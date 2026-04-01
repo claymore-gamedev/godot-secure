@@ -15,7 +15,12 @@ class LogColors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
-    
+        
+def validate_custom_name(custom_name : str):
+    if len(custom_name) == 0:
+        return "Godot Engine (With Godot Secure)"
+    return custom_name.strip()
+
 def generate_random_tag(length=4):
     return ''.join(random.choices(string.ascii_uppercase, k=length))
 
@@ -114,6 +119,7 @@ def print_warning(message):
 global godot_root
 global encKey
 
+customName = validate_custom_name("Godot Engine (With Godot Secure)")
 baseTag = generate_random_tag()
 encTag = generate_random_tag()
 security_token = generate_random_token()
@@ -126,7 +132,7 @@ key_derivation_algorithm = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i]
 fileCreated = True
 backup_path = None
 current_dt = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
-logFileName = f"Log-{current_dt}-Godot-Secure-AES.txt"
+logFileName = f"Log-{current_dt}-Godot-Secure-Camellia.txt"
 
 # Backup Properties
 quiz_override = False
@@ -187,6 +193,13 @@ if not (confirm == 'y' or confirm == 'yes'):
     
 save_log(f"Start Godot Secure Operations on Godot Source Root (y/n)?: {confirm}")
 
+confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Engine Name {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+save_log(f"\n[INFO] - Use Custom Engine Name (y/n)?: {confirm}")
+if (confirm == 'y' or confirm == 'yes'):
+    customName = input("    Enter Custom Engine Name: ")
+    customName = validate_custom_name(customName)
+    save_log(f"    Enter Custom Engine Name: {customName}")
+
 confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Headers {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
 save_log(f"\n[INFO] - Use Custom Headers (y/n)?: {confirm}")
 if (confirm == 'y' or confirm == 'yes'):
@@ -220,7 +233,7 @@ MODIFICATIONS = [
                 "type": "replace_line",
                 "description": "Modify Godot title To add Godot Secure",
                 "find": "name = \"Godot Engine\"",
-                "replace": "name = \"Godot Engine (With Godot Secure)\""
+                "replace": f"name = \"{customName}\""
             }
         ]
     },
@@ -232,7 +245,7 @@ MODIFICATIONS = [
                 "type": "replace_line",
                 "description": "Modify Godot export popup title To add Godot Secure",
                 "find": "set_title(TTR(\"Export\"));",
-                "replace": "set_title(TTR(\"Export With Godot Secure (AES-256)\"));"
+                "replace": f"set_title(TTR(\"Export With {customName} (Camelia-256)\"));"
             }
         ]
     },
@@ -284,7 +297,7 @@ MODIFICATIONS = [
             }
         ]
     },
-    # Step 3: Modify AES Decryption + Token Integration
+    # Step 3: Replace AES with Camellia (Decrypt) + Token Integration
     {
         "file": "core/io/file_access_encrypted.cpp",
         "operations": [
@@ -307,7 +320,7 @@ MODIFICATIONS = [
                 ],
                 "replace": [
                     "{",
-                    "CryptoCore::AESContext ctx;",
+                    "CryptoCore::CamelliaContext ctx;",
                     "",
                     "    // Apply security token to key",
                     "    Vector<uint8_t> token_key;",
@@ -317,14 +330,14 @@ MODIFICATIONS = [
                     f"        {key_derivation_algorithm}",
                     "    }",
                     "",
-                    "    ctx.set_encode_key(token_key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!",
+                    "    ctx.set_encode_key(token_key.ptrw(), 256);",
                     "    ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());",
                     "}"
                 ]
             }
         ]
     },
-    # Step 4: Modify AES Encryption + Token Integration
+    # Step 4: Replace AES with Camellia (Encrypt) + Token Integration
     {
         "file": "core/io/file_access_encrypted.cpp",
         "operations": [
@@ -346,7 +359,7 @@ MODIFICATIONS = [
                     "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());"
                 ],
                 "replace": [
-                    "CryptoCore::AESContext ctx;",
+                    "CryptoCore::CamelliaContext ctx;",
                     "",
                     "    // Apply security token to key",
                     "    Vector<uint8_t> token_key;",
@@ -367,6 +380,110 @@ MODIFICATIONS = [
                     "file->store_buffer(iv.ptr(), 16);",
                     "",
                     "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());"
+                ]
+            }
+        ]
+    },
+    # Step 5: Add Camellia Class
+    {
+        "file": "core/crypto/crypto_core.h",
+        "operations": [
+            {
+                "type": "insert_after",
+                "description": "Add CamelliaContext class",
+                "find": "};",
+                "replace": [
+                    "// Camellia-256 (via Mbed TLS)",
+                    "class CamelliaContext {",
+                    "private:",
+                    "    void *ctx = nullptr;",
+                    "",
+                    "public:",
+                    "    CamelliaContext();",
+                    "    ~CamelliaContext();",
+                    "",
+                    "    Error set_encode_key(const uint8_t *p_key, size_t p_bits);",
+                    "    Error set_decode_key(const uint8_t *p_key, size_t p_bits);",
+                    "    Error encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
+                    "    Error decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
+                    "    Error encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                    "    Error decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                    "    Error encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                    "    Error decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
+                    "};",
+                    ""
+                ]
+            }
+        ]
+    },
+    # Step 6: Add Camellia Implementation
+    {
+        "file": "core/crypto/crypto_core.cpp",
+        "operations": [
+            {
+                "type": "insert_after",
+                "description": "Add Camellia include",
+                "find": "#include <mbedtls/aes.h>",
+                "replace": "#include <mbedtls/camellia.h>"
+            },
+            {
+                "type": "append",
+                "description": "Add Camellia implementation",
+                "replace": [
+                    "// ----------------------------------------------------------------",
+                    "// Camellia-256 implementation",
+                    "",
+                    "CryptoCore::CamelliaContext::CamelliaContext() {",
+                    "    ctx = memalloc(sizeof(mbedtls_camellia_context));",
+                    "    mbedtls_camellia_init((mbedtls_camellia_context *)ctx);",
+                    "}",
+                    "",
+                    "CryptoCore::CamelliaContext::~CamelliaContext() {",
+                    "    mbedtls_camellia_free((mbedtls_camellia_context *)ctx);",
+                    "    memfree(ctx);",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::set_encode_key(const uint8_t *p_key, size_t p_bits) {",
+                    "    int ret = mbedtls_camellia_setkey_enc((mbedtls_camellia_context *)ctx, p_key, p_bits);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::set_decode_key(const uint8_t *p_key, size_t p_bits) {",
+                    "    int ret = mbedtls_camellia_setkey_dec((mbedtls_camellia_context *)ctx, p_key, p_bits);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
+                    "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_src, r_dst);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
+                    "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_src, r_dst);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                    "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, r_iv, p_src, r_dst);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                    "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, r_iv, p_src, r_dst);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                    "    size_t iv_off = 0;",
+                    "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
+                    "    return ret ? FAILED : OK;",
+                    "}",
+                    "",
+                    "Error CryptoCore::CamelliaContext::decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
+                    "    size_t iv_off = 0;",
+                    "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
+                    "    return ret ? FAILED : OK;",
+                    "}"
                 ]
             }
         ]
@@ -430,7 +547,6 @@ def apply_modifications(root_dir):
         if not os.path.exists(file_path):
             print_error(f"File not found: {file_path}")
             continue
-
         else:
             local_backup = file_path + ".backup"
 
@@ -562,7 +678,7 @@ def apply_modifications(root_dir):
             print_warning(f"No changes made to file (Step {step})")
 
 if __name__ == "__main__":
-    log = save_log("\n=== Applying Enhanced AES Encryption For Godot ===")
+    log = save_log("\n=== Applying Enhanced Camellia Encryption For Godot ===")
     print(f"\n\n{LogColors.HEADER}{log}{LogColors.ENDC}")
     apply_modifications(godot_root)
     print(f"\n{LogColors.HEADER}=== Operation Complete (View Logs For Info) ==={LogColors.ENDC}\n")
