@@ -1,5 +1,7 @@
 cd bin/godot/bin
 
+mkdir ~/.local/share/godot/export_templates/4.6.3.stable/
+
 # Copy editor to godot4 executable
 sudo cp godot.linuxbsd.editor.x86_64 /usr/bin/godot4
 
