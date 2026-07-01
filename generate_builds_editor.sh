@@ -8,7 +8,7 @@ export SCRIPT_AES256_ENCRYPTION_KEY=$(cat godot.gdkey)
 cd godot/
 
 # Build the editor
-scons target=editor production=yes platform=linuxbsd use_static_cpp=yes debug_symbols=no lto=auto linker=mold
+scons target=editor production=yes platform=linuxbsd use_static_cpp=yes debug_symbols=no lto=auto
 
 # Copy editor to godot4 executable
 sudo cp bin/godot.linuxbsd.editor.x86_64 /usr/bin/godot4
