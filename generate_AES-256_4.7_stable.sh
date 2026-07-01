@@ -29,3 +29,11 @@ export SCRIPT_AES256_ENCRYPTION_KEY=$(cat godot.gdkey)
 # Run godot-secure scripts
 python ../scripts/v4.6.x-latest/godot-secure_AES-256_v4.py ./godot/
 
+cd godot
+
+python misc/scripts/install_accesskit.py
+python misc/scripts/install_angle.py
+python misc/scripts/install_d3d12_sdk_windows.py
+python misc/scripts/install_perfetto.py
+python misc/scripts/install_swappy_android.py
+python misc/scripts/install_winrt.py
