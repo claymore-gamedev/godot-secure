@@ -28,5 +28,5 @@ export SCRIPT_AES256_ENCRYPTION_KEY=$(cat godot.gdkey)
 # replace_string apple banana
 
 # Run godot-secure scripts
-python ../scripts/v4.6.x-latest/godot-secure_AES-256_v4.py ./godot/
+python ../scripts/godot-secure_AES-256_v4.py ./godot/
 

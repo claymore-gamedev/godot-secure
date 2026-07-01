@@ -1,9 +1,10 @@
 import os
-import re
 import sys
 import random
 import string
 import binascii
+import secrets
+import datetime
 
 class LogColors:
     HEADER = '\033[95m'
@@ -15,11 +16,19 @@ class LogColors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
     
+def validate_custom_name(custom_name : str):
+    if len(custom_name) == 0:
+        return "Godot Engine (With Godot Secure)"
+    return custom_name.strip()
+
 def generate_random_tag(length=4):
     return ''.join(random.choices(string.ascii_uppercase, k=length))
 
 def generate_random_token(length=32):
     return bytes([random.randint(0, 255) for _ in range(length)])
+
+def hex_to_bytes(hex_string: str) -> bytes:
+    return bytes.fromhex(hex_string)
 
 def generate_magic_header(tag: str, endian='little') -> str:
     if len(tag) != 4:
@@ -31,52 +40,86 @@ def generate_magic_header(tag: str, endian='little') -> str:
     hex_value = "0x" + ''.join(f"{ord(c):02X}" for c in tag)
     return hex_value
 
+def build_random_key_derivation():
+    operands = ["key_ptr[i]", "Security::TOKEN[i]"]
+
+    base_ops = [
+        "({a} ^ {b})",
+        "({a} + {b})",
+        "({a} | {b})",
+        "({a} & {b})",
+        "(({a} << {shift}) | ({a} >> {rshift}))",
+        "(({a} ^ {b}) + {const})",
+        "(({a} + {b}) ^ {const})",
+    ]
+
+    chain_ops = [
+        "({expr} ^ {value})",
+        "({expr} + {value})",
+        "({expr} | {value})",
+        "(({expr} << {shift}) | ({expr} >> {rshift}))",
+        "(({expr} ^ {value}) + {const})",
+        "(({expr} + {value}) ^ {const})",
+    ]
+
+    def rotation():
+        shift = secrets.randbelow(7) + 1
+        return shift, 8 - shift
+
+    def rand_const():
+        return secrets.randbelow(255) + 1  # never zero
+
+    layers = secrets.randbelow(5) + 2
+
+    a = secrets.choice(operands)
+    b = operands[1] if a == operands[0] else operands[0]
+    shift, rshift = rotation()
+
+    expression = secrets.choice(base_ops).format(a=a,b=b,shift=shift,rshift=rshift,const=rand_const())
+
+    for _ in range(layers - 1):
+        shift, rshift = rotation()
+        value = secrets.choice(operands)
+
+        # never allow identical cancellation
+        if value == expression:
+            value = secrets.choice(operands)
+
+        expression = secrets.choice(chain_ops).format(expr=expression,value=value,shift=shift,rshift=rshift,const=rand_const())
+
+    return f"token_key.write[i] = (uint8_t)({expression});"
+
+def save_log(message):
+    if not str(message).find("\033[") > 0:
+        with open(logFileName,"a", encoding="utf-8") as logf: logf.write(f"{message}\n")
+    return message
+
 def print_success(message):
+    save_log(f"      [✓] {message}")
     print(f"{LogColors.OKGREEN}      ✓{LogColors.ENDC} {message}")
 
 def print_error(message):
+    save_log(f"      [✗] {message}\n")
     print(f"{LogColors.FAIL}      ✗{LogColors.ENDC} {message}")
 
 def print_info(message):
+    save_log(f"\n[INFO] -   {message}")
     print(f"\n{LogColors.OKBLUE} ℹ {LogColors.ENDC} {message}")
     
 def print_operation(message):
+    save_log(f"   [=>] {message}")
     print(f"{LogColors.HEADER}   =>{LogColors.ENDC} {message}")
 
 def print_warning(message):
+    save_log(f"\n[WARN] -   {message}")
     print(f"\n{LogColors.WARNING} ⚠ {LogColors.ENDC} {message}")
-# Version helpers
-def version_tuple(version_str) -> tuple:
-    # Convert version string (e.g., '4.6') to numeric tuple (4, 6)
-    try:
-        parts = version_str.split('.')
-        return tuple(int(p) for p in parts)
-    except:
-        return (4, 6)  # default to 4.6+ for resilience
 
-def should_apply_operation(op, major_version, minor_version) -> bool:
-    # Filters operations based on version constraints
-    # Examples:
-    #   version_min: 4.6,  applies to 4.6 and newer
-    #   version_max: 4.5, applies to 4.5 and older
-    #   Both: 4.3 + 4.5, applies only to 4.3-4.5 range
-    current_version = (major_version, minor_version)
-    
-    # Reject if current version is below minimum required
-    if "version_min" in op:
-        min_version = version_tuple(op["version_min"])
-        if current_version < min_version:
-            return False
-    
-    # Reject if current version is above maximum supported
-    if "version_max" in op:
-        max_version = version_tuple(op["version_max"])
-        if current_version > max_version:
-            return False
-    
-    return True
 
 # Generate unique identifiers
+global godot_root
+global encKey
+
+customName = validate_custom_name("Godot Engine (With Godot Secure)")
 baseTag = generate_random_tag()
 encTag = generate_random_tag()
 security_token = generate_random_token()
@@ -84,9 +127,103 @@ token_hex = binascii.hexlify(security_token).decode('utf-8')
 token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
 baseHeader = generate_magic_header(baseTag)
 encHeader = generate_magic_header(encTag)
+key_derivation_algorithm = "token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];"
+
 fileCreated = True
 backup_path = None
+current_dt = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+logFileName = f"Log-{current_dt}-Godot-Secure-AES.txt"
 
+# Backup Properties
+quiz_override = False
+override_backup = True
+not_modify_on_error = True
+track_backup_file = set()
+
+
+# Start Script Startup Operations
+if len(sys.argv) == 1:
+    # No argument provided, use current directory
+    godot_root = os.getcwd()
+    print("\nNo directory specified. Using current directory as Godot Source Root.")
+elif len(sys.argv) == 2:
+    # One argument provided, use it as Godot root
+    godot_root = sys.argv[1]
+else:
+    # Too many arguments provided
+    print("\nUsage: python Godot_Secure.py <godot_source_root>")
+    try:
+        exit = input("\nPress Enter key to exit...")
+    except EOFError:
+        pass
+    sys.exit(1)
+    
+
+# Log File Creation
+with open(logFileName, "w", encoding="utf-8") as logf: logf.write(f"Created On - {current_dt}\nThis is Godot-Secure Log file, SAVE IT to secure place for later getting values.\n\n")
+
+# Check for required Godot source components
+core_dir = os.path.join(godot_root, "core")
+sconstruct_file = os.path.join(godot_root, "SConstruct")
+
+# Get Current Encryption Key From Enviroment
+try:
+    encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
+except:
+    encKey = "Can't Fetch Your Enviroment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
+
+if not (os.path.isdir(core_dir) and os.path.isfile(sconstruct_file)):
+    log = save_log("Error: No valid Godot Source Detected in the Specified Directory.")
+    print(f"{LogColors.FAIL}{log}{LogColors.ENDC}")
+    try:
+        exit = input("\nPress Enter key to exit...")
+    except EOFError:
+        pass
+    sys.exit(1)
+
+print(save_log(f"\nUsing Godot Source Root: {godot_root}"))
+confirm = input(f"\n\n ⚠   {LogColors.WARNING}Start Godot Secure Operations on Godot Source Root {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+if not (confirm == 'y' or confirm == 'yes'):
+    print(save_log("Closing Setup..."))
+    try:
+        exit = input("\nPress Enter key to exit...")
+    except EOFError:
+        pass
+    sys.exit(1)
+
+save_log(f"Start Godot Secure Operations on Godot Source Root (y/n)?: {confirm}")
+
+confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Engine Name {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+save_log(f"\n[INFO] - Use Custom Engine Name (y/n)?: {confirm}")
+if (confirm == 'y' or confirm == 'yes'):
+    customName = input("    Enter Custom Engine Name: ")
+    customName = validate_custom_name(customName)
+    save_log(f"    Enter Custom Engine Name: {customName}")
+
+confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Headers {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+save_log(f"\n[INFO] - Use Custom Headers (y/n)?: {confirm}")
+if (confirm == 'y' or confirm == 'yes'):
+    baseTag = input("    Enter Custom Magic Header (e.g. GDPC): ").upper()
+    baseHeader = generate_magic_header(baseTag)
+    encTag = input("    Enter Custom Encrypted Magic Header (e.g. GDEC): ").upper()
+    encHeader = generate_magic_header(encTag)
+    save_log(f"    Enter Custom Magic Header (e.g. GDPC): {baseTag}\n    Enter Custom Encrypted Magic Header (e.g. GDEC): {encTag}")
+
+confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Custom Token {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+save_log(f"\n[INFO] - Use Custom Token (y/n)?: {confirm}")
+if (confirm == 'y' or confirm == 'yes'):
+    token_hex = str(input("    Enter Custom Security Token: ")).lower()
+    security_token = hex_to_bytes(token_hex)
+    token_c_array = ', '.join([f'0x{b:02X}' for b in security_token])
+    save_log(f"    Enter Custom Security Token: {token_hex}")
+
+confirm = input(f"\n\n ℹ  {LogColors.OKBLUE}Use Advanced Key Derivation {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
+save_log(f"\n[INFO] - Use Advanced Key Derivation (y/n)?: {confirm}")
+if (confirm == 'y' or confirm == 'yes'):
+    key_derivation_algorithm = build_random_key_derivation()
+    save_log(f"    Generated Advanced Key Derivation Algorithm:\n            {key_derivation_algorithm}")
+
+# Modifications to be made in source
 MODIFICATIONS = [
     #Pre -Steps:
     {
@@ -94,9 +231,9 @@ MODIFICATIONS = [
         "operations": [
             {
                 "type": "replace_line",
-                "description": "Modify Godot title To add Godot Secure",
+                "description": "Modify Godot title to add custom name",
                 "find": "name = \"Godot Engine\"",
-                "replace": "name = \"Godot Engine (With Godot Secure)\""
+                "replace": f"name = \"{customName}\"",
             }
         ]
     },
@@ -106,9 +243,9 @@ MODIFICATIONS = [
         "operations": [
             {
                 "type": "replace_line",
-                "description": "Modify Godot export popup title To add Godot Secure",
-                "find": "set_title(TTR(\"Export\"));",
-                "replace": "set_title(TTR(\"Export With Godot Secure (Camellia-256)\"));"
+                "description": "Modify Godot export popup title to add custom name",
+                "find": "set_title(TTRC(\"Export\"));",
+                "replace": f"set_title(TTRC(\"Export With {customName} (AES-256)\"));",
             }
         ]
     },
@@ -160,7 +297,7 @@ MODIFICATIONS = [
             }
         ]
     },
-    # Step 3: Replace AES with Camellia (Decrypt) + Token Integration
+    # Step 3: Modify AES Decryption + Token Integration
     {
         "file": "core/io/file_access_encrypted.cpp",
         "operations": [
@@ -183,31 +320,30 @@ MODIFICATIONS = [
                 ],
                 "replace": [
                     "{",
-                    "CryptoCore::CamelliaContext ctx;",
+                    "CryptoCore::AESContext ctx;",
                     "",
                     "    // Apply security token to key",
                     "    Vector<uint8_t> token_key;",
                     "    token_key.resize(32);",
                     "    const uint8_t *key_ptr = key.ptr();",
                     "    for (int i = 0; i < 32; i++) {",
-                    "        token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];",
+                    f"        {key_derivation_algorithm}",
                     "    }",
                     "",
-                    "    ctx.set_encode_key(token_key.ptrw(), 256);",
+                    "    ctx.set_encode_key(token_key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!",
                     "    ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());",
                     "}"
                 ]
             }
         ]
     },
-    # Step 4: Replace AES with Camellia (Encrypt) + Token Integration
+    # Step 4: Modify AES Encryption + Token Integration
     {
         "file": "core/io/file_access_encrypted.cpp",
         "operations": [
             {
                 "type": "replace_block",
                 "description": "Add token obfuscation for encryption",
-                "version_min": "4.6", # applies to 4.6 and everything above
                 "find": [
                     "CryptoCore::AESContext ctx;",
                     "ctx.set_encode_key(key.ptrw(), 256);",
@@ -223,14 +359,14 @@ MODIFICATIONS = [
                     "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());"
                 ],
                 "replace": [
-                    "CryptoCore::CamelliaContext ctx;",
+                    "CryptoCore::AESContext ctx;",
                     "",
                     "    // Apply security token to key",
                     "    Vector<uint8_t> token_key;",
                     "    token_key.resize(32);",
                     "    const uint8_t *key_ptr = key.ptr();",
                     "    for (int i = 0; i < 32; i++) {",
-                    "        token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];",
+                    f"        {key_derivation_algorithm}",
                     "    }",
                     "",
                     "    ctx.set_encode_key(token_key.ptrw(), 256);",
@@ -244,152 +380,6 @@ MODIFICATIONS = [
                     "file->store_buffer(iv.ptr(), 16);",
                     "",
                     "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());"
-                ]
-            },
-            {
-                "type": "replace_block",
-                "description": "Add token obfuscation for encryption (pre-4.6)",
-                "version_max": "4.5", # applies to 4.5 and everything below
-                "find": [
-                    "CryptoCore::AESContext ctx;",
-                    "ctx.set_encode_key(key.ptrw(), 256);",
-                    "",
-                    "if (use_magic) {",
-                    "    file->store_32(ENCRYPTED_HEADER_MAGIC);",
-                    "}",
-                    "",
-                    "file->store_buffer(hash, 16);",
-                    "file->store_64(data.size());",
-                    "file->store_buffer(iv.ptr(), 16);",
-                    "",
-                    "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptrw(), compressed.ptrw());"
-                ],
-                "replace": [
-                    "CryptoCore::CamelliaContext ctx;",
-                    "",
-                    "    // Apply security token to key",
-                    "    Vector<uint8_t> token_key;",
-                    "    token_key.resize(32);",
-                    "    const uint8_t *key_ptr = key.ptr();",
-                    "    for (int i = 0; i < 32; i++) {",
-                    "        token_key.write[i] = key_ptr[i] ^ Security::TOKEN[i];",
-                    "    }",
-                    "",
-                    "    ctx.set_encode_key(token_key.ptrw(), 256);",
-                    "",
-                    "if (use_magic) {",
-                    "file->store_32(ENCRYPTED_HEADER_MAGIC);",
-                    "}",
-                    "",
-                    "file->store_buffer(hash, 16);",
-                    "file->store_64(data.size());",
-                    "file->store_buffer(iv.ptr(), 16);",
-                    "",
-                    "ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptrw(), compressed.ptrw());"
-                ]
-            }
-        ]
-    },
-    # Step 5: Add Camellia Class
-    {
-        "file": "core/crypto/crypto_core.h",
-        "operations": [
-            {
-                "type": "insert_after",
-                "description": "Add CamelliaContext class",
-                "find": "};",
-                "replace": [
-                    "// Camellia-256 (via Mbed TLS)",
-                    "class CamelliaContext {",
-                    "private:",
-                    "    void *ctx = nullptr;",
-                    "",
-                    "public:",
-                    "    CamelliaContext();",
-                    "    ~CamelliaContext();",
-                    "",
-                    "    Error set_encode_key(const uint8_t *p_key, size_t p_bits);",
-                    "    Error set_decode_key(const uint8_t *p_key, size_t p_bits);",
-                    "    Error encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
-                    "    Error decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]);",
-                    "    Error encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
-                    "    Error decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
-                    "    Error encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
-                    "    Error decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst);",
-                    "};",
-                    ""
-                ]
-            }
-        ]
-    },
-    # Step 6: Add Camellia Implementation
-    {
-        "file": "core/crypto/crypto_core.cpp",
-        "operations": [
-            {
-                "type": "insert_after",
-                "description": "Add Camellia include",
-                "find": "#include <mbedtls/aes.h>",
-                "replace": "#include <mbedtls/camellia.h>"
-            },
-            {
-                "type": "append",
-                "description": "Add Camellia implementation",
-                "replace": [
-                    "// ----------------------------------------------------------------",
-                    "// Camellia-256 implementation",
-                    "",
-                    "CryptoCore::CamelliaContext::CamelliaContext() {",
-                    "    ctx = memalloc(sizeof(mbedtls_camellia_context));",
-                    "    mbedtls_camellia_init((mbedtls_camellia_context *)ctx);",
-                    "}",
-                    "",
-                    "CryptoCore::CamelliaContext::~CamelliaContext() {",
-                    "    mbedtls_camellia_free((mbedtls_camellia_context *)ctx);",
-                    "    memfree(ctx);",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::set_encode_key(const uint8_t *p_key, size_t p_bits) {",
-                    "    int ret = mbedtls_camellia_setkey_enc((mbedtls_camellia_context *)ctx, p_key, p_bits);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::set_decode_key(const uint8_t *p_key, size_t p_bits) {",
-                    "    int ret = mbedtls_camellia_setkey_dec((mbedtls_camellia_context *)ctx, p_key, p_bits);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::encrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
-                    "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_src, r_dst);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::decrypt_ecb(const uint8_t p_src[16], uint8_t r_dst[16]) {",
-                    "    int ret = mbedtls_camellia_crypt_ecb((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_src, r_dst);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::encrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
-                    "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, r_iv, p_src, r_dst);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::decrypt_cbc(size_t p_length, uint8_t r_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
-                    "    int ret = mbedtls_camellia_crypt_cbc((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, r_iv, p_src, r_dst);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::encrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
-                    "    size_t iv_off = 0;",
-                    "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_ENCRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
-                    "    return ret ? FAILED : OK;",
-                    "}",
-                    "",
-                    "Error CryptoCore::CamelliaContext::decrypt_cfb(size_t p_length, uint8_t p_iv[16], const uint8_t *p_src, uint8_t *r_dst) {",
-                    "    size_t iv_off = 0;",
-                    "    int ret = mbedtls_camellia_crypt_cfb128((mbedtls_camellia_context *)ctx, MBEDTLS_CAMELLIA_DECRYPT, p_length, &iv_off, p_iv, p_src, r_dst);",
-                    "    return ret ? FAILED : OK;",
-                    "}"
                 ]
             }
         ]
@@ -397,32 +387,12 @@ MODIFICATIONS = [
 ]
 
 def apply_modifications(root_dir):
-    print_info(f"Randomly Generated PACK_HEADER_MAGIC : {baseHeader} //Generated Tag : {baseTag}")
-    print_info(f"Randomly Generated ENCRYPTED_HEADER_MAGIC : {encHeader} //Generated Tag : {encTag}")
+    global override_backup, quiz_override
+
+    print_info(f"Generated PACK_HEADER_MAGIC : {baseHeader} //Tag : {baseTag}")
+    print_info(f"Generated ENCRYPTED_HEADER_MAGIC : {encHeader} //Tag : {encTag}")
     print_info(f"Security Token: {token_hex}")
-
-    major_version = 4
-    minor_version = 6 # Default latest version of Godot for resilience
-
-    if os.path.exists("version.py"):
-        try:
-            with open("version.py", "r") as f:
-                file_content = f.read()
-
-            match_major = re.search(r"major\s*=\s*(\d+)", file_content)
-            match_minor = re.search(r"minor\s*=\s*(\d+)", file_content)
-
-            if match_minor and match_major:
-                minor_version = int(match_minor.group(1))
-                major_version = int(match_major.group(1))
-                print_info(f"Godot version detected: {major_version}.{minor_version}")
-            else:
-                print_error(f"Could not read version.py, assuming Godot {major_version}.{minor_version}+")
-        except Exception as e:
-            print_error(f"Error reading version.py: {e}, assuming Godot {major_version}.{minor_version}+")
-    else:
-        print_error(f"version.py not found, assuming Godot {major_version}.{minor_version}+")
-
+    
     step = 0
     for mod in MODIFICATIONS:
         file_path = os.path.join(root_dir, mod["file"])
@@ -473,6 +443,37 @@ def apply_modifications(root_dir):
         if not os.path.exists(file_path):
             print_error(f"File not found: {file_path}")
             continue
+
+        else:
+            local_backup = file_path + ".backup"
+
+            if not (local_backup in track_backup_file):
+                track_backup_file.add(local_backup)
+                create_backup = True
+
+                if os.path.exists(local_backup):
+                    if not quiz_override:
+                        quiz_override = True
+                        print_warning(f"Backup of origins file already exists")
+                        override_backup = input("   Do you want to overwrite it? (y/n): ").strip().lower()
+                        if not (override_backup == 'y' or override_backup == 'yes'):
+                            override_backup = False
+                    
+                    create_backup = override_backup
+
+                if create_backup:
+                    try:
+                        with open(file_path, 'r') as file0:
+                            content = file0.read()
+                            with open(local_backup, "w") as file1:
+                                file1.write(content)
+                            print_success(f"Backup File created: {local_backup}")
+                    except Exception as e:
+                        print_error(f"Failed to created backup of origin file: {e}")
+
+                        if not_modify_on_error:
+                            print_operation("Skipping file modification.")
+                            continue
             
         print_info(f"Step {step} (Processing: {file_path}):")
         
@@ -481,9 +482,6 @@ def apply_modifications(root_dir):
 
         modified = False
         for op in mod["operations"]:
-            # Filter operations based on Godot version
-            if not should_apply_operation(op, major_version, minor_version):
-                continue
             op_type = op["type"]
             description = op.get("description", "")
             print_operation(f"Operation: {description}. (Type: {op_type})")
@@ -577,52 +575,8 @@ def apply_modifications(root_dir):
             print_warning(f"No changes made to file (Step {step})")
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        # No argument provided, use current directory
-        godot_root = os.getcwd()
-        print("\nNo directory specified. Using current directory as Godot Source Root.")
-    elif len(sys.argv) == 2:
-        # One argument provided, use it as Godot root
-        godot_root = sys.argv[1]
-    else:
-        # Too many arguments provided
-        print("\nUsage: python Godot_Secure.py <godot_source_root>")
-        try:
-            exit = input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
-        sys.exit(1)
-        
-
-    # Check for required Godot source components
-    core_dir = os.path.join(godot_root, "core")
-    sconstruct_file = os.path.join(godot_root, "SConstruct")
-    
-    # Get Current Encryption Key From Enviroment
-    try:
-        encKey = os.environ["SCRIPT_AES256_ENCRYPTION_KEY"]
-    except:
-        encKey = "Can't Fetch Your Enviroment Variable \"SCRIPT_AES256_ENCRYPTION_KEY\""
-
-    if not (os.path.isdir(core_dir) and os.path.isfile(sconstruct_file)):
-        print(f"{LogColors.FAIL}Error: No valid Godot Source Detected in the Specified Directory.{LogColors.ENDC}")
-        try:
-            exit = input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
-        sys.exit(1)
-
-    print(f"\nUsing Godot Source Root: {godot_root}")
-    confirm = input(f"\n\n ⚠   {LogColors.WARNING}Start Godot Secure Operations on Godot Source Root {LogColors.ENDC}{LogColors.FAIL}(y/n)?{LogColors.ENDC}: ").strip().lower()
-    if not (confirm == 'y' or confirm == 'yes'):
-        print("Closing Setup...")
-        try:
-            exit = input("\nPress Enter key to exit...")
-        except EOFError:
-            pass
-        sys.exit(1)
-        
-    print(f"\n\n{LogColors.HEADER}=== Applying Camellia Encryption For Godot ==={LogColors.ENDC}")
+    log = save_log("\n=== Applying Enhanced AES Encryption For Godot ===")
+    print(f"\n\n{LogColors.HEADER}{log}{LogColors.ENDC}")
     apply_modifications(godot_root)
     print(f"\n{LogColors.HEADER}=== Operation Complete (View Logs For Info) ==={LogColors.ENDC}\n")
     if fileCreated == True:
@@ -630,7 +584,10 @@ if __name__ == "__main__":
         print(f"{LogColors.WARNING} Encryption Key: {LogColors.FAIL}{encKey}{LogColors.ENDC}")
         print_warning(f"{LogColors.WARNING} Security Token and Encryption Key are different. Use {LogColors.FAIL}\"Encryption Key\"{LogColors.WARNING} During Export!{LogColors.ENDC}")
         print_success(f"{LogColors.OKGREEN} Build is now Cryptographically Unique{LogColors.ENDC}")
+        save_log(f"\nSecurity Token: {token_hex}\nEncryption Key: {encKey}")
+        save_log(f"\n[WARN] - Security Token and Encryption Key are different. Use Encryption Key During Export!")
         if not (backup_path == None):
+            save_log(f"\n[INFO] - Old Key Backup Created at: {backup_path}")
             print_info(f"{LogColors.OKGREEN} Old Key Backup Created at: {LogColors.ENDC}{LogColors.BOLD}{backup_path}{LogColors.ENDC}\n")
     
     try:
